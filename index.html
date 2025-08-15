@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>RPG de Magia — Save integrado</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game" width="900" height="640" tabindex="0"></canvas>
+    <div id="ui">
+      <button id="restartBtn">Reiniciar</button>
+      <button id="upgradeBtn">Melhorias</button>
+    </div>
+    <div class="hint">WASD / Setas = mover · Clique esquerdo = atirar</div>
+  </div>
+
+  <div id="upgradeScreen" aria-hidden="true">
+    <div id="upgradeHeader">
+      <div>Moedas: <strong id="coinsDisplay">0</strong></div>
+      <div>Orbes: <strong id="orbsDisplay">0</strong></div>
+    </div>
+    <div id="upgradesGrid"></div>
+    <button id="btnAumentarGanhos">Aumentar Ganhos (1 Orbe)</button>
+    <button id="backToGameBtn">Voltar ao Jogo</button>
+    <button id="elementosBtn" style="margin-left:8px">Elementos</button>
+  </div>
+
+  <div id="elementosPanel">
+    <h4>Elementos</h4>
+    <div class="elem-row">🔥 Fogo — <span id="elemFogo" class="elem-nao" onclick="comprarElemento('Fogo', this)">Comprar</span></div>
+    <div class="elem-row">❄️ Gelo — <span id="elemGelo" class="elem-nao" onclick="comprarElemento('Gelo', this)">Comprar</span></div>
+    <div class="elem-row">🌪️ Ar — <span id="elemAr" class="elem-nao" onclick="comprarElemento('Ar', this)">Comprar</span></div>
+    <div class="elem-row">⚡ Raio — <span id="elemRaio" class="elem-nao" onclick="comprarElemento('Raio', this)">Comprar</span></div>
+    <p>Todos desta seção custam 5𖦹 e 50🪙</p>
+  </div>
+
+  <div id="gameOverOverlay"><div></div><small></small></div>
+
+<script>
+
+/* =========================
+   FULL GAME — single file (save integrado)
+   ========================= */
+
+/* ---------- Config / Audio ---------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const uiDiv = document.getElementById('ui');
+const restartBtn = document.getElementById('restartBtn');
+const upgradeBtn = document.getElementById('upgradeBtn');
+const elementosBtn = document.getElementById('elementosBtn');
+
+const upgradeScreen = document.getElementById('upgradeScreen');
+const upgradesGrid = document.getElementById('upgradesGrid');
+const backToGameBtn = document.getElementById('backToGameBtn');
+const coinsDisplay = document.getElementById('coinsDisplay');
+const orbsDisplay = document.getElementById('orbsDisplay');
+const btnAumentarGanhos = document.getElementById('btnAumentarGanhos');
+
+const elementosPanel = document.getElementById('elementosPanel');
+const elemFogo = document.getElementById('elemFogo');
+const elemGelo = document.getElementById('elemGelo');
+const elemAr = document.getElementById('elemAr');
+const elemRaio = document.getElementById('elemRaio');
+
+const elements = [
+    { name: "Fogo", owned: false, orbCost: 5, coinCost: 50 },
+    { name: "Gelo", owned: false, orbCost: 5, coinCost: 50 },
+    { name: "Ar", owned: false, orbCost: 5, coinCost: 50 },
+    { name: "Raio", owned: false, orbCost: 5, coinCost: 50 }
+];
+
+
+const gameOverOverlay = document.getElementById('gameOverOverlay');
+
+const audioFiles = {
+  musicaNormal: 'sons/musica_normal.mp3',
+  musicaBoss:   'sons/musica_boss.mp3',
+  tiro:         'sons/tiro.mp3',
+  dano:         'sons/dano.mp3',
+  morte:        'sons/morte.mp3',
+  bossMorto:    'sons/boss_morto.mp3'
+};
+
+const musicaNormal = new Audio(audioFiles.musicaNormal); musicaNormal.loop = true; musicaNormal.volume = 0.5;
+const musicaBoss = new Audio(audioFiles.musicaBoss); musicaBoss.loop = true; musicaBoss.volume = 0.6;
+const sTiro = new Audio(audioFiles.tiro);
+const sDano = new Audio(audioFiles.dano);
+const sMorte = new Audio(audioFiles.morte);
+const sBossMorto = new Audio(audioFiles.bossMorto);
+
+function playEffect(baseAudio, volume=1){
+  try {
+    const a = new Audio(baseAudio.src || baseAudio);
+    a.volume = volume;
+    a.play().catch(()=>{});
+  } catch(e) {}
+}
+function playMusicNormal(){ try{ musicaBoss.pause(); musicaBoss.currentTime=0; musicaNormal.play().catch(()=>{}); }catch(e){} }
+function playMusicBoss(){ try{ musicaNormal.pause(); musicaNormal.currentTime=0; musicaBoss.play().catch(()=>{}); }catch(e){} }
+function stopAllMusic(){ try{ musicaNormal.pause(); musicaBoss.pause(); }catch(e){} }
+
+/* ---------- Save / Load (localStorage) ---------- */
+const SAVE_KEY = 'rpg_magic_save_v1';
+
+function carregarSave() {
+  const raw = localStorage.getItem(SAVE_KEY);
+  if(!raw) return;
+  try {
+    const d = JSON.parse(raw);
+    if (typeof d.coins !== 'undefined') coins = parseFloat(d.coins);
+    if (typeof d.orbs !== 'undefined') orbs = parseInt(d.orbs);
+    if (typeof d.custoAumentarGanhos !== 'undefined') custoAumentarGanhos = parseInt(d.custoAumentarGanhos);
+    if (typeof d.ganhoMultiplicador !== 'undefined') ganhoMultiplicador = parseFloat(d.ganhoMultiplicador);
+    if (d.upgrades) {
+      for (const k in d.upgrades) if (upgrades[k]) upgrades[k].level = d.upgrades[k].level || upgrades[k].level;
+    }
+    if (d.elementos) {
+      elementos = Object.assign(elementos, d.elementos);
+    }
+  } catch(e) {
+    console.warn('Erro ao carregar save:', e);
+  }
+}
+function salvarSave() {
+  const payload = {
+    coins, orbs, custoAumentarGanhos, ganhoMultiplicador,
+    upgrades: {
+      manaRegen: { level: upgrades.manaRegen.level },
+      maxMana:   { level: upgrades.maxMana.level },
+      damage:    { level: upgrades.damage.level },
+      health:    { level: upgrades.health.level }
+    },
+    elementos
+  };
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
+  } catch(e) {
+    console.warn('Erro ao salvar:', e);
+  }
+}
+window.addEventListener('beforeunload', salvarSave);
+setInterval(salvarSave, 3000); // autosave a cada 3s
+
+/* ---------- State ---------- */
+let currentScreen = 'game'; // 'game' or 'upgrade'
+let gameOver = false;
+let deathAlpha = 0;
+
+let wave = 1;
+let kills = 0;
+let coins = 0; // persistent via save
+let orbs = 0;  // persistent via save
+let bossSpawned = false;
+
+let enemySpawnRate = 1800; // ms
+let spawnInterval = null;
+let enemySpeedBoost = 0;
+let enemyDamageBoost = 0;
+let normalEnemyHpMultiplier = 1;
+
+/* Boss scaling */
+const BOSS_HP_MULT = 2.8;
+const BOSS_SPEED_MULT = 1.6;
+const BOSS_SIZE_MULT = 1.6;
+
+/* Player base stats */
+const playerBase = {
+  size: 28,
+  speed: 4.2,
+  color: 'cyan',
+  baseHP: 100,
+  baseMana: 50,
+  baseDamage: 25,
+  manaRegen: 0.06
+};
+
+let player = {
+  x: canvas.width/2,
+  y: canvas.height/2,
+  size: playerBase.size,
+  speed: playerBase.speed,
+  color: playerBase.color,
+  hp: playerBase.baseHP,
+  maxHp: playerBase.baseHP,
+  mana: playerBase.baseMana,
+  maxMana: playerBase.baseMana,
+  damage: playerBase.baseDamage,
+  manaRegen: playerBase.manaRegen
+};
+
+/* Entities */
+let spells = [];
+let enemies = [];
+
+/* Upgrades */
+const upgrades = {
+  manaRegen: { name:'Recarga de Mana', level:0, maxLevel:10, basePrice:10, desc:'+10% recarga por nível' },
+  maxMana:   { name:'Mana Máxima',     level:0, maxLevel:10, basePrice:10, desc:'+25 mana por nível' },
+  damage:    { name:'Dano',            level:0, maxLevel:10, basePrice:10, desc:'+5 dano por nível' },
+  health:    { name:'Vida',            level:0, maxLevel:10, basePrice:10, desc:'+50 HP por nível' }
+};
+function getUpgradePrice(u){ return Math.round(u.basePrice * Math.pow(2, u.level)); }
+function applyUpgrades(){
+  const oldMaxHp = player.maxHp;
+  player.manaRegen = playerBase.manaRegen * (1 + 0.1 * upgrades.manaRegen.level);
+  player.maxMana = playerBase.baseMana + 25 * upgrades.maxMana.level;
+  player.damage = playerBase.baseDamage + 5 * upgrades.damage.level;
+  player.maxHp = playerBase.baseHP + 50 * upgrades.health.level;
+  const delta = player.maxHp - oldMaxHp;
+  if(delta>0) player.hp = Math.min(player.maxHp, player.hp + delta);
+  if(player.mana > player.maxMana) player.mana = player.maxMana;
+}
+
+/* ---------- Ganhos via Orbe (botão) ---------- */
+let ganhoMultiplicador = 1;     // multiplicador dos ganhos (1x por padrão)
+let custoAumentarGanhos = 1;    // custo inicial (orbes)
+
+/* ---------- Elementos ---------- */
+let elementos = { fogo:false, gelo:false, ar:false, raio:false };
+
+/* ---------- Spawn / Waves ---------- */
+function scheduleSpawnInterval(){
+  if(spawnInterval){ clearInterval(spawnInterval); spawnInterval=null; }
+  spawnInterval = setInterval(()=> spawnEnemy(), enemySpawnRate);
+}
+
+function spawnEnemy(){
+  if(gameOver || currentScreen !== 'game') return;
+  const padding = 30;
+  let ex, ey, d;
+  do{
+    ex = Math.random() * (canvas.width - padding*2) + padding;
+    ey = Math.random() * (canvas.height - padding*2) + padding;
+    d = Math.hypot(ex - player.x, ey - player.y);
+  }while(d < 120);
+
+  let isSpecial = false;
+  if(wave >= 5 && Math.random() < 0.18) isSpecial = true;
+
+  if(isSpecial){
+    enemies.push({
+      x: ex, y: ey,
+      size: 40,
+      hp: Math.round(30 * normalEnemyHpMultiplier * 4),
+      speed: 1.1 + enemySpeedBoost,
+      damage: (5 + enemyDamageBoost) * 2,
+      type: 'special',
+      color: 'green',
+      rotation: 0,
+      coinsGiven: 3
+    });
+  } else {
+    enemies.push({
+      x: ex, y: ey,
+      size: 20,
+      hp: Math.round(30 * normalEnemyHpMultiplier),
+      speed: 1 + enemySpeedBoost,
+      damage: 5 + enemyDamageBoost,
+      type: 'normal',
+      color: 'red',
+      rotation: 0,
+      coinsGiven: 1
+    });
+  }
+}
+
+function spawnBoss(){
+  enemies = [];
+  const baseEnemyHp = 30;
+  const bossHp = Math.round(baseEnemyHp * 20 * BOSS_HP_MULT);
+  const bossSize = Math.round(80 * BOSS_SIZE_MULT);
+  const bossSpeed = 0.45 * BOSS_SPEED_MULT;
+  enemies.push({
+    x: canvas.width/2,
+    y: canvas.height/4,
+    size: bossSize,
+    hp: bossHp,
+    speed: bossSpeed,
+    damage: 400,
+    type: 'boss',
+    color: '#9b59ff',
+    rotation: 0,
+    coinsGiven: 40
+  });
+}
+
+/* wave tick every 10s */
+let waveTickInterval = setInterval(()=>{
+  if(currentScreen !== 'game' || gameOver) return;
+  if(wave === 10){
+    if(!bossSpawned){
+      bossSpawned = true;
+      spawnBoss();
+      if(spawnInterval){ clearInterval(spawnInterval); spawnInterval=null; }
+      playMusicBoss();
+      bossNextManaDraggerIn = 15 + Math.random()*5;
+    }
+    return;
+  }
+  wave++;
+  if(wave % 10 === 0) normalEnemyHpMultiplier += 0.5;
+  enemySpeedBoost += 0.15;
+  enemyDamageBoost += 0.4;
+  enemySpawnRate = Math.max(450, enemySpawnRate - 120);
+  scheduleSpawnInterval();
+  if(wave % 5 === 0 && wave !== 10) {
+    orbs++;
+  }
+}, 10000);
+
+/* ---------- Input ---------- */
+let keys = {};
+document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+let mouse = { x:0, y:0 };
+canvas.addEventListener('mousemove', e=>{
+  const r = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - r.left;
+  mouse.y = e.clientY - r.top;
+});
+canvas.addEventListener('mousedown', e=>{
+  if(currentScreen === 'game' && !gameOver && e.button === 0) castSpell();
+});
+
+/* ---------- Spells ---------- */
+const SPELL_SPEED = 9;
+const SPELL_COST = 8;
+
+function castSpell(){
+  if(player.mana < SPELL_COST) return;
+  const dx = mouse.x - player.x;
+  const dy = mouse.y - player.y;
+  const d = Math.hypot(dx,dy) || 1;
+  const vx = (dx/d)*SPELL_SPEED;
+  const vy = (dy/d)*SPELL_SPEED;
+  spells.push({ x: player.x, y: player.y, vx, vy, size:8, damage: player.damage, color:'deepskyblue' });
+  player.mana -= SPELL_COST;
+  playEffect(sTiro, 0.9);
+}
+
+/* ---------- Boss Mana Dragger ---------- */
+let bossNextManaDraggerIn = 9999;
+let manaDraggerActive = false;
+let manaDraggerTimer = 0;
+let manaBlockedTimer = 0;
+
+function maybeTriggerBossManaDragger(dt){
+  if(!bossSpawned) return;
+  bossNextManaDraggerIn -= dt;
+  if(bossNextManaDraggerIn <= 0){
+    manaDraggerActive = true;
+    manaDraggerTimer = 0;
+    manaBlockedTimer = 4; // bloqueia regen por 4s
+    player.mana = 0;
+    bossNextManaDraggerIn = 15 + Math.random()*5;
+  }
+}
+
+/* ---------- Update ---------- */
+let lastTime = performance.now();
+
+function update(){
+  const now = performance.now();
+  const dt = (now - lastTime)/1000;
+  lastTime = now;
+
+  if(currentScreen !== 'game') return;
+
+  if(gameOver){
+    deathAlpha = Math.min(deathAlpha + 0.02, 0.9);
+    return;
+  }
+
+  // movement
+  let moveX = 0, moveY = 0;
+  if(keys.w || keys.arrowup) moveY -= 1;
+  if(keys.s || keys.arrowdown) moveY += 1;
+  if(keys.a || keys.arrowleft) moveX -= 1;
+  if(keys.d || keys.arrowright) moveX += 1;
+  let moving = false;
+  if(moveX!==0 || moveY!==0){
+    moving = true;
+    const L = Math.hypot(moveX,moveY) || 1;
+    moveX/=L; moveY/=L;
+    player.x += moveX * player.speed;
+    player.y += moveY * player.speed;
+  }
+
+  // bounds (center)
+  const half = player.size/2;
+  player.x = Math.max(half, Math.min(canvas.width - half, player.x));
+  player.y = Math.max(half, Math.min(canvas.height - half, player.y));
+
+  // spells update
+  for(let i=spells.length-1;i>=0;i--){
+    const s = spells[i];
+    s.x += s.vx; s.y += s.vy;
+    if(s.x < -50 || s.x > canvas.width+50 || s.y < -50 || s.y > canvas.height+50){
+      spells.splice(i,1); continue;
+    }
+  }
+
+  // enemies update
+  for(let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    if(e.type === 'boss'){
+      e.rotation += 0.045;
+      const dx = player.x - e.x;
+      const dy = player.y - e.y;
+      const dist = Math.hypot(dx,dy) || 1;
+      if(dist > 6){
+        e.x += (dx/dist) * e.speed;
+        e.y += (dy/dist) * e.speed;
+      }
+      const contactRadius = player.size/2 + e.size/2;
+      const dToP = Math.hypot(e.x - player.x, e.y - player.y);
+      if(dToP < contactRadius){
+        player.hp -= e.damage * dt;
+        playEffect(sDano, 0.6);
+      }
+    } else { // normal or special
+      const dx = player.x - e.x;
+      const dy = player.y - e.y;
+      const dist = Math.hypot(dx,dy) || 1;
+      e.x += (dx/dist) * e.speed;
+      e.y += (dy/dist) * e.speed;
+      const dToP = Math.hypot(e.x - player.x, e.y - player.y);
+      if(dToP < (player.size/2 + e.size/2)){
+        player.hp -= e.damage * 0.05;
+        playEffect(sDano, 0.5);
+      }
+    }
+  }
+
+  // collisions: spells vs enemies
+  for(let ei=enemies.length-1; ei>=0; ei--){
+    const e = enemies[ei];
+    let hit = false;
+    for(let si=spells.length-1; si>=0; si--){
+      const s = spells[si];
+      const dx = e.x - s.x;
+      const dy = e.y - s.y;
+      const dist = Math.hypot(dx,dy);
+      if(dist < (e.size/2 + s.size/2)){
+        e.hp -= s.damage;
+        spells.splice(si,1);
+        hit = true;
+        playEffect(sDano, 0.8);
+        if(e.hp <= 0){
+          // death
+          if(e.type === 'boss'){
+            playEffect(sBossMorto,1.0);
+            orbs += 3;
+            coins += (e.coinsGiven || 40) * ganhoMultiplicador;
+            kills++;
+            enemies.splice(ei,1);
+            bossSpawned = false;
+            wave++; // advance past 10
+            normalEnemyHpMultiplier += 0.5;
+            enemySpeedBoost += 0.2;
+            enemyDamageBoost += 0.5;
+            enemySpawnRate = Math.max(450, enemySpawnRate - 100);
+            scheduleSpawnInterval();
+            playMusicNormal();
+          } else {
+            coins += (e.coinsGiven || 1) * ganhoMultiplicador;
+            kills++;
+            enemies.splice(ei,1);
+            playEffect(sMorte,0.7);
+          }
+        }
+        break;
+      }
+    }
+    if(hit) continue;
+  }
+
+  // mana regen (blocked during manaDragger)
+  if(manaBlockedTimer > 0){
+    manaBlockedTimer = Math.max(0, manaBlockedTimer - dt);
+  } else {
+    const factor = moving ? 1 : 1.6;
+    player.mana = Math.min(player.maxMana, player.mana + player.manaRegen * factor);
+  }
+
+  // boss mana dragger
+  if(bossSpawned){
+    maybeTriggerBossManaDragger(dt);
+    if(manaDraggerActive){
+      manaDraggerTimer += dt;
+      if(manaDraggerTimer >= 4){
+        manaDraggerActive = false;
+        manaDraggerTimer = 0;
+      }
+    }
+  }
+
+  // death
+  if(player.hp <= 0 && !gameOver){
+    player.hp = 0;
+    triggerGameOver();
+  }
+}
+
+/* ---------- Drawing ---------- */
+function drawHexagon(x,y,r,rot,color){
+  ctx.save();
+  ctx.translate(x,y);
+  ctx.rotate(rot);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for(let i=0;i<6;i++){
+    const a = Math.PI/3 * i;
+    const px = Math.cos(a) * r;
+    const py = Math.sin(a) * r;
+    if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // purple overlay for Mana Dragger
+  if(manaDraggerActive){
+    const alpha = 0.45 * (1 - (manaDraggerTimer/4));
+    ctx.fillStyle = `rgba(180,100,255,${alpha})`;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+  }
+
+  // player square (center-based)
+  ctx.fillStyle = player.color;
+  ctx.shadowColor = player.color;
+  ctx.shadowBlur = 12;
+  ctx.fillRect(player.x - player.size/2, player.y - player.size/2, player.size, player.size);
+  ctx.shadowBlur = 0;
+
+  // spells (small squares)
+  for(const s of spells){
+    ctx.fillStyle = s.color;
+    ctx.fillRect(s.x - s.size/2, s.y - s.size/2, s.size, s.size);
+  }
+
+  // enemies
+  for(const e of enemies){
+    if(e.type === 'boss'){
+      drawHexagon(e.x, e.y, e.size/2, e.rotation, e.color);
+      // boss HP bar
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(e.x - e.size/2, e.y + e.size/2 + 8, e.size, 8);
+      ctx.fillStyle = '#ff5555';
+      const bossMaxHp = Math.round(30 * 20 * BOSS_HP_MULT);
+      const w = Math.max(0, (e.hp / bossMaxHp) * e.size);
+      ctx.fillRect(e.x - e.size/2, e.y + e.size/2 + 8, w, 8);
+    } else {
+      ctx.fillStyle = e.color;
+      ctx.fillRect(e.x - e.size/2, e.y - e.size/2, e.size, e.size);
+      // small hp bar
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(e.x - e.size/2, e.y + e.size/2 + 6, e.size, 6);
+      ctx.fillStyle = '#88ff88';
+      const denom = (e.type === 'special') ? (30*4*normalEnemyHpMultiplier) : (30*normalEnemyHpMultiplier);
+      const ww = Math.max(0, (e.hp / denom) * e.size);
+      ctx.fillRect(e.x - e.size/2, e.y + e.size/2 + 6, ww, 6);
+    }
+  }
+
+  // HUD top-left
+  ctx.fillStyle = '#e6f9ff';
+  ctx.font = '16px Segoe UI';
+  ctx.textAlign = 'left';
+  ctx.fillText(`HP: ${Math.floor(player.hp)} / ${player.maxHp}`, 12, 20);
+  ctx.fillText(`Mana: ${Math.floor(player.mana)} / ${player.maxMana}`, 12, 40);
+  ctx.fillText(`Kills (partida): ${kills}`, 12, 62);
+  ctx.fillText(`Moedas: ${Math.floor(coins)}`, 12, 84);
+  ctx.fillText(`Orbes: ${Math.floor(orbs)}`, 12, 106);
+  ctx.fillText(`Onda: ${wave}`, 12, 128);
+
+  // game over UI text (canvas dim)
+  if(gameOver){
+    ctx.fillStyle = `rgba(0,0,0,${deathAlpha})`;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle = '#ff6666';
+    ctx.font = 'bold 48px Segoe UI';
+    ctx.textAlign = 'center';
+    ctx.font = '20px Segoe UI';
+    ctx.textAlign = 'left';
+  }
+}
+
+/* ---------- Game Over / Restart / UI ---------- */
+function triggerGameOver(){
+  gameOver = true;
+  deathAlpha = 0;
+  uiDiv.style.display = 'block';
+  gameOverOverlay.style.display = 'flex';
+  stopAllMusic();
+  playEffect(sMorte,1.0);
+  if(spawnInterval){ clearInterval(spawnInterval); spawnInterval = null; }
+}
+
+function restartGame(){
+  // coins and orbs persist; kills reset for the match
+  kills = 0;
+  wave = 1;
+  gameOver = false;
+  deathAlpha = 0;
+  bossSpawned = false;
+  enemies = [];
+  spells = [];
+  player.x = canvas.width/2;
+  player.y = canvas.height/2;
+  applyUpgrades();
+  player.hp = player.maxHp;
+  player.mana = player.maxMana;
+  enemySpawnRate = 1800;
+  enemySpeedBoost = 0;
+  enemyDamageBoost = 0;
+  normalEnemyHpMultiplier = 1;
+  scheduleSpawnInterval();
+  playMusicNormal();
+  uiDiv.style.display = 'none';
+  gameOverOverlay.style.display = 'none';
+  updateUIDisplays();
+}
+
+restartBtn.onclick = ()=> restartGame();
+
+upgradeBtn.onclick = ()=>{
+  if(currentScreen === 'game') openUpgradeScreen();
+  else closeUpgradeScreen();
+};
+
+/* ---------- Upgrade screen handling ---------- */
+function openUpgradeScreen(){
+  currentScreen = 'upgrade';
+  upgradeScreen.style.display = 'block';
+  uiDiv.style.display = 'none';
+  renderUpgrades();
+  updateUpgradeScreen();
+  elementosPanel.style.display = 'none'; // show quick elements panel when upgrades open
+}
+
+function closeUpgradeScreen(){
+  currentScreen = 'game';
+  upgradeScreen.style.display = 'none';
+  uiDiv.style.display = gameOver ? 'block' : 'none';
+  applyUpgrades();
+  elementosPanel.style.display = 'none';
+}
+
+backToGameBtn.onclick = ()=> closeUpgradeScreen();
+
+/* ---------- Update / Render Upgrades ---------- */
+function renderUpgrades(){
+  upgradesGrid.innerHTML = '';
+  for(const key in upgrades){
+    const up = upgrades[key];
+    const price = getUpgradePrice(up);
+    const canBuy = (coins >= price) && (up.level < up.maxLevel);
+    const card = document.createElement('div');
+    card.className = 'upgradeCard' + (canBuy ? '' : ' disabled');
+    card.innerHTML = `<h3>${up.name}</h3><p>Nível: ${up.level} / ${up.maxLevel}</p><p>${up.desc}</p><p style="margin-top:8px;font-weight:800">${up.level>=up.maxLevel ? 'Máximo' : 'Preço: ' + price + ' moedas'}</p>`;
+    if(canBuy){
+      card.onclick = ()=> {
+        coins -= price;
+        up.level++;
+        applyUpgrades();
+        updateUpgradeScreen();
+        renderUpgrades();
+      };
+    }
+    upgradesGrid.appendChild(card);
+  }
+}
+
+/* ---------- Upgrade screen aux (button text + currency displays) ---------- */
+function updateUpgradeScreen(){
+  coinsDisplay.textContent = Math.floor(coins);
+  orbsDisplay.textContent = Math.floor(orbs);
+  btnAumentarGanhos.textContent = `Aumentar Ganhos (${custoAumentarGanhos} Orbe${custoAumentarGanhos>1?'s':''})`;
+  renderUpgrades();
+}
+
+/* ---------- Aumentar Ganhos button ---------- */
+btnAumentarGanhos.addEventListener('click', ()=>{
+  if(orbs >= custoAumentarGanhos){
+    orbs -= custoAumentarGanhos;
+    ganhoMultiplicador *= 1.25;
+    custoAumentarGanhos = Math.round(custoAumentarGanhos * 2);
+    updateUpgradeScreen();
+    updateUIDisplays();
+    salvarSave();
+  } else {
+    // feedback leve
+    // console.log('Orbes insuficientes');
+  }
+});
+
+/* ---------- Elementos panel ---------- */
+elementosBtn.addEventListener('click', ()=>{
+  // toggle quick panel
+  elementosPanel.style.display = (elementosPanel.style.display === 'block') ? 'none' : 'block';
+  atualizarPainelElementos();
+});
+function atualizarPainelElementos(){
+  elemFogo.textContent = elementos.fogo ? 'Possui' : 'Comprar';
+  elemFogo.className = elementos.fogo ? 'elem-possui' : 'elem-nao';
+  elemGelo.textContent = elementos.gelo ? 'Possui' : 'Comprar';
+  elemGelo.className = elementos.gelo ? 'elem-possui' : 'elem-nao';
+  elemAr.textContent = elementos.ar ? 'Possui' : 'Comprar';
+  elemAr.className = elementos.ar ? 'elem-possui' : 'elem-nao';
+  elemRaio.textContent = elementos.raio ? 'Possui' : 'Comprar';
+  elemRaio.className = elementos.raio ? 'elem-possui' : 'elem-nao';
+}
+
+// Preço fixo para cada elemento
+const elementoPreco = {
+    orbs: 5,
+    coins: 50
+};
+
+// Guarda o elemento atualmente equipado
+let elementoEquipado = localStorage.getItem("elementoAtual") || null;
+
+function atualizarBotoesElementos() {
+    document.querySelectorAll(".elem-nao").forEach(botao => {
+        if (orbs >= elementoPreco.orbs && coins >= elementoPreco.coins) {
+            botao.style.backgroundColor = "green";
+        } else {
+            botao.style.backgroundColor = "red";
+        }
+    });
+
+    document.querySelectorAll(".elem-possui").forEach(botao => {
+        const nome = botao.dataset.elemento;
+        if (elementoEquipado === nome) {
+            botao.textContent = "Desequipar";
+            botao.style.backgroundColor = "red";
+        } else {
+            botao.textContent = "Equipar";
+            botao.style.backgroundColor = "green";
+        }
+    });
+}
+
+function comprarElemento(nomeElemento, botao) {
+    if (orbs >= elementoPreco.orbs && coins >= elementoPreco.coins) {
+        orbs -= elementoPreco.orbs;
+        coins -= elementoPreco.coins;
+        localStorage.setItem(`possui_${nomeElemento}`, true);
+        botao.parentElement.classList.remove("elem-nao");
+        botao.parentElement.classList.add("elem-possui");
+        botao.dataset.elemento = nomeElemento;
+        botao.onclick = () => equiparElemento(nomeElemento, botao);
+    } else {
+        alert("Recursos insuficientes!");
+    }
+    atualizarRecursosUI();
+    atualizarBotoesElementos();
+}
+
+function equiparElemento(nomeElemento, botao) {
+    if (elementoEquipado === nomeElemento) {
+        // Desequipar
+        elementoEquipado = null;
+        localStorage.removeItem("elementoAtual");
+    } else {
+        // Equipar e remover o anterior
+        elementoEquipado = nomeElemento;
+        localStorage.setItem("elementoAtual", nomeElemento);
+    }
+    atualizarBotoesElementos();
+}
+
+setInterval(atualizarBotoesElementos, 200);
+
+
+
+/* ---------- Misc UI updates ---------- */
+function updateUIDisplays(){
+  coinsDisplay.textContent = Math.floor(coins);
+  orbsDisplay.textContent = Math.floor(orbs);
+}
+
+/* ---------- Init / Start ---------- */
+// load save before applying upgrades so upgrades persist
+carregarSave();
+applyUpgrades();
+updateUIDisplays();
+atualizarPainelElementos();
+restartGame();      // sets up spawn & state
+scheduleSpawnInterval();
+playMusicNormal();
+setInterval(atualizarBotoesElementos, 200);
+/* ---------- Game Loop ---------- */
+function gameLoop(){
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+gameLoop();
+
+/* ========== Helpful: click canvas to resume audio if blocked ========== */
+canvas.addEventListener('click', ()=> {
+  try { musicaNormal.play().catch(()=>{}); } catch(e){}
+});
+
+/* Small helper so other code can call save */
+function forcarSalvarAgora(){ salvarSave(); }
+
+/* Expose some functions for console debugging (optional) */
+window.__rpg = { salvarSave, carregarSave, forcarSalvarAgora, upgrades, elementos };
+
+</script>
+</body>
+</html>
